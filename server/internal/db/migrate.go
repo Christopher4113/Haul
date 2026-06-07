@@ -26,6 +26,49 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id ON password_reset_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires_at ON password_reset_tokens(expires_at);
+
+CREATE EXTENSION IF NOT EXISTS postgis;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+CREATE TABLE IF NOT EXISTS sessions (
+	id         UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+	user_id    UUID NOT NULL,
+	origin     GEOGRAPHY(POINT, 4326),
+	created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS errands (
+	id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+	session_id  UUID REFERENCES sessions(id) ON DELETE CASCADE,
+	name        TEXT NOT NULL,
+	address     TEXT NOT NULL,
+	location    GEOGRAPHY(POINT, 4326),
+	place_id    TEXT,
+	cluster_id  INT,
+	seq_order   INT,
+	created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_errands_location ON errands USING GIST(location);
+
+CREATE TABLE IF NOT EXISTS routes (
+	id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+	session_id    UUID REFERENCES sessions(id),
+	status        TEXT DEFAULT 'pending',
+	geojson       JSONB,
+	total_km      FLOAT,
+	total_mins    INT,
+	cluster_count INT,
+	created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS optimizer_events (
+	id          BIGSERIAL PRIMARY KEY,
+	route_id    UUID REFERENCES routes(id),
+	event_type  TEXT,
+	payload     JSONB,
+	created_at  TIMESTAMPTZ DEFAULT NOW()
+);
 `
 
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {

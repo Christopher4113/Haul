@@ -1,6 +1,7 @@
 import { Navigate, useLocation } from "react-router-dom"
 
 import { useAuth } from "@/hooks/use-auth"
+import { tokenStorage } from "@/lib/api"
 
 export default function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth()
@@ -14,7 +15,7 @@ export default function PrivateRoute({ children }: { children: React.ReactNode }
     )
   }
 
-  if (!user) {
+  if (!tokenStorage.get() || !user) {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />
   }
 

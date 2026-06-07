@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Christopher4113/Haul/server/internal/config"
@@ -54,11 +55,14 @@ func main() {
 	}
 
 	authHandler := handlers.NewAuthHandler(pool, cfg, mail)
+	errandHandler := handlers.NewErrandHandler(pool, cfg)
+	routeHandler := handlers.NewRouteHandler(pool)
 	authMiddleware := middleware.Auth(cfg.JWTSecret)
 
-	mux := http.NewServeMux()
+	r := chi.NewRouter()
+	r.Use(middleware.CORS)
 
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		if err := pool.Ping(r.Context()); err != nil {
 			http.Error(w, "database unavailable", http.StatusServiceUnavailable)
 			return
@@ -67,14 +71,23 @@ func main() {
 		fmt.Fprint(w, "ok")
 	})
 
-	mux.HandleFunc("POST /api/auth/register", authHandler.Register)
-	mux.HandleFunc("POST /api/auth/login", authHandler.Login)
-	mux.HandleFunc("POST /api/auth/forgot-password", authHandler.ForgotPassword)
-	mux.HandleFunc("POST /api/auth/reset-password", authHandler.ResetPassword)
-	mux.Handle("GET /api/auth/me", authMiddleware(http.HandlerFunc(authHandler.Me)))
+	r.Route("/api", func(r chi.Router) {
+		r.Post("/auth/register", authHandler.Register)
+		r.Post("/auth/login", authHandler.Login)
+		r.Post("/auth/forgot-password", authHandler.ForgotPassword)
+		r.Post("/auth/reset-password", authHandler.ResetPassword)
+
+		r.Group(func(r chi.Router) {
+			r.Use(authMiddleware)
+			r.Get("/auth/me", authHandler.Me)
+			r.Post("/errands", errandHandler.Create)
+			r.Post("/routes/optimize", routeHandler.Optimize)
+			r.Get("/routes/{route_id}/stream", routeHandler.Stream)
+		})
+	})
 
 	log.Printf("listening on :%s", cfg.Port)
-	if err := http.ListenAndServe(":"+cfg.Port, middleware.CORS(mux)); err != nil {
+	if err := http.ListenAndServe(":"+cfg.Port, r); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }

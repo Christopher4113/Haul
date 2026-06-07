@@ -8,11 +8,12 @@ import (
 )
 
 type Config struct {
-	Port      string
-	DBURL     string
-	JWTSecret string
-	Env       string
-	SMTP      SMTPConfig
+	Port             string
+	DBURL            string
+	JWTSecret        string
+	Env              string
+	GooglePlacesKey  string
+	SMTP             SMTPConfig
 }
 
 type SMTPConfig struct {
@@ -73,10 +74,11 @@ func Load() Config {
 	}
 
 	return Config{
-		Port:      port,
-		DBURL:     dbURL,
-		JWTSecret: jwtSecret,
-		Env:       env,
+		Port:            port,
+		DBURL:           dbURL,
+		JWTSecret:       jwtSecret,
+		Env:             env,
+		GooglePlacesKey: os.Getenv("GOOGLE_PLACES_KEY"),
 		SMTP: SMTPConfig{
 			Host:      smtpHost,
 			Port:      smtpPort,

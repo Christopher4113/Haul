@@ -49,6 +49,23 @@ export interface AuthResponse {
   user: User
 }
 
+export interface ErrandResponse {
+  id: string
+  name: string
+  address: string
+  lat: number
+  lng: number
+}
+
+export interface Errand {
+  id: string
+  name: string
+  address: string
+  lat: number | null
+  lng: number | null
+  clusterId: string | null
+}
+
 export const api = {
   register: (body: { name: string; email: string; password: string }) =>
     request<AuthResponse>("/api/auth/register", {
@@ -76,6 +93,38 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+
+  addErrand: (
+    token: string,
+    body: { session_id: string; name: string; address: string },
+  ) =>
+    request<ErrandResponse>(
+      "/api/errands",
+      { method: "POST", body: JSON.stringify(body) },
+      token,
+    ),
+
+  optimizeRoute: async (token: string, sessionId: string, signal?: AbortSignal) => {
+    const response = await fetch(`${API_URL}/api/routes/optimize`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ session_id: sessionId }),
+      signal,
+    })
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}))
+      throw new ApiError(
+        response.status,
+        typeof payload.error === "string" ? payload.error : "Request failed",
+      )
+    }
+
+    return response
+  },
 }
 
 export const TOKEN_KEY = "haul_token"
