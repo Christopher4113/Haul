@@ -5,22 +5,28 @@ import (
 	"encoding/json"
 	"log"
 	"math"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Christopher4113/Haul/server/internal/clustering"
+	"github.com/Christopher4113/Haul/server/internal/storehours"
 )
 
 type errandRow struct {
-	ID    string
-	Name  string
-	Address string
-	Lat   float64
-	Lng   float64
+	ID       string
+	Name     string
+	Address  string
+	Lat      float64
+	Lng      float64
+	PlaceID  *string
+	OpenNow  *bool
+	OpensAt  *time.Time
+	ClosesAt *time.Time
 }
 
-func Run(ctx context.Context, pool *pgxpool.Pool, routeID, sessionID string) {
-	if err := run(ctx, pool, routeID, sessionID); err != nil {
+func Run(ctx context.Context, pool *pgxpool.Pool, routeID, sessionID, googleRoutesKey string) {
+	if err := run(ctx, pool, routeID, sessionID, googleRoutesKey); err != nil {
 		log.Printf("optimizer failed for route %s: %v", routeID, err)
 		if _, updateErr := pool.Exec(ctx, `
 			UPDATE routes SET status = 'error' WHERE id = $1
@@ -34,7 +40,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, routeID, sessionID string) {
 	}
 }
 
-func run(ctx context.Context, pool *pgxpool.Pool, routeID, sessionID string) error {
+func run(ctx context.Context, pool *pgxpool.Pool, routeID, sessionID, googleRoutesKey string) error {
 	errands, err := fetchGeocodedErrands(ctx, pool, sessionID)
 	if err != nil {
 		return err
@@ -57,13 +63,14 @@ func run(ctx context.Context, pool *pgxpool.Pool, routeID, sessionID string) err
 		})
 	}
 
+	now := time.Now()
 	points := make([]clustering.Point, len(errands))
 	for i, errand := range errands {
-		points[i] = clustering.Point{Lat: errand.Lat, Lng: errand.Lng}
+		points[i] = toClusteringPoint(errand, now)
 	}
 
 	k := max(1, int(math.Floor(math.Sqrt(float64(len(errands))/2))))
-	assignments := clustering.KMeans(points, k)
+	assignments := clustering.KMeans(points, k, now)
 
 	clusterSummaries := make([]map[string]any, k)
 	clusterMembers := make([][]errandRow, k)
@@ -83,7 +90,7 @@ func run(ctx context.Context, pool *pgxpool.Pool, routeID, sessionID string) err
 		members := clusterMembers[clusterID]
 		memberPoints := make([]clustering.Point, len(members))
 		for i, member := range members {
-			memberPoints[i] = clustering.Point{Lat: member.Lat, Lng: member.Lng}
+			memberPoints[i] = toClusteringPoint(member, now)
 		}
 		centroid := clustering.Centroid(memberPoints)
 		clusterSummaries[clusterID] = map[string]any{
@@ -103,7 +110,12 @@ func run(ctx context.Context, pool *pgxpool.Pool, routeID, sessionID string) err
 
 	ordered := make([]orderedErrand, 0, len(errands))
 	seq := 1
-	lineCoords := make([][]float64, 0, len(errands))
+	lineCoords := make([][]float64, 0, len(errands)+1)
+
+	origin, hasOrigin := fetchSessionOrigin(ctx, pool, sessionID)
+	if hasOrigin {
+		lineCoords = append(lineCoords, []float64{origin.Lng, origin.Lat})
+	}
 
 	for clusterID := 0; clusterID < k; clusterID++ {
 		members := clusterMembers[clusterID]
@@ -113,10 +125,14 @@ func run(ctx context.Context, pool *pgxpool.Pool, routeID, sessionID string) err
 
 		memberPoints := make([]clustering.Point, len(members))
 		for i, member := range members {
-			memberPoints[i] = clustering.Point{Lat: member.Lat, Lng: member.Lng}
+			memberPoints[i] = toClusteringPoint(member, now)
 		}
 		centroid := clustering.Centroid(memberPoints)
-		clusterOrder := nearestNeighborOrder(members, centroid)
+		start := centroid
+		if clusterID == 0 && hasOrigin {
+			start = origin
+		}
+		clusterOrder := nearestNeighborOrder(members, start)
 
 		for _, errand := range clusterOrder {
 			if err := updateErrandSeqOrder(ctx, pool, errand.ID, seq); err != nil {
@@ -129,16 +145,22 @@ func run(ctx context.Context, pool *pgxpool.Pool, routeID, sessionID string) err
 				Lat:       errand.Lat,
 				Lng:       errand.Lng,
 				ClusterID: clusterID,
+				OpenNow:   errand.OpenNow,
+				OpensAt:   errand.OpensAt,
+				ClosesAt:  errand.ClosesAt,
 			})
 			lineCoords = append(lineCoords, []float64{errand.Lng, errand.Lat})
 			seq++
 		}
 	}
 
-	geojson := map[string]any{
+	fallbackGeoJSON := map[string]any{
 		"type":        "LineString",
 		"coordinates": lineCoords,
 	}
+
+	geojson, totalKm, totalMins, legs := applyRouteRouting(ctx, googleRoutesKey, origin, hasOrigin, ordered, fallbackGeoJSON)
+
 	geojsonBytes, err := json.Marshal(geojson)
 	if err != nil {
 		return err
@@ -146,9 +168,9 @@ func run(ctx context.Context, pool *pgxpool.Pool, routeID, sessionID string) err
 
 	if _, err := pool.Exec(ctx, `
 		UPDATE routes
-		SET status = 'done', geojson = $2, cluster_count = $3
+		SET status = 'done', geojson = $2, cluster_count = $3, total_km = $4, total_mins = $5
 		WHERE id = $1
-	`, routeID, geojsonBytes, k); err != nil {
+	`, routeID, geojsonBytes, k, totalKm, int(math.Round(totalMins))); err != nil {
 		return err
 	}
 
@@ -161,13 +183,29 @@ func run(ctx context.Context, pool *pgxpool.Pool, routeID, sessionID string) err
 			"lat":        item.Lat,
 			"lng":        item.Lng,
 			"cluster_id": item.ClusterID,
+			"open_now":   item.OpenNow,
+			"opens_at":   formatOptionalTime(item.OpensAt, now),
+			"closes_at":  formatOptionalTime(item.ClosesAt, now),
+		}
+	}
+
+	legsPayload := make([]map[string]any, len(legs))
+	for i, leg := range legs {
+		legsPayload[i] = map[string]any{
+			"from_id":       leg.FromID,
+			"to_id":         leg.ToID,
+			"duration_mins": leg.DurationMins,
+			"distance_km":   leg.DistanceKm,
 		}
 	}
 
 	return writeEvent(ctx, pool, routeID, "optimized", map[string]any{
-		"type":    "optimized",
-		"geojson": geojson,
-		"order":   orderPayload,
+		"type":       "optimized",
+		"geojson":    geojson,
+		"total_km":   totalKm,
+		"total_mins": totalMins,
+		"legs":       legsPayload,
+		"order":      orderPayload,
 	})
 }
 
@@ -178,19 +216,29 @@ type orderedErrand struct {
 	Lat       float64
 	Lng       float64
 	ClusterID int
+	OpenNow   *bool
+	OpensAt   *time.Time
+	ClosesAt  *time.Time
 }
 
 func fetchGeocodedErrands(ctx context.Context, pool *pgxpool.Pool, sessionID string) ([]errandRow, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT
-			id::text,
-			name,
-			address,
-			ST_Y(location::geometry) AS lat,
-			ST_X(location::geometry) AS lng
-		FROM errands
-		WHERE session_id = $1 AND location IS NOT NULL
-		ORDER BY created_at ASC
+			e.id::text,
+			e.name,
+			e.address,
+			ST_Y(e.location::geometry) AS lat,
+			ST_X(e.location::geometry) AS lng,
+			e.place_id,
+			sh.open_now,
+			sh.opens_at,
+			sh.closes_at
+		FROM errands e
+		LEFT JOIN store_hours sh ON sh.place_id = e.place_id
+		WHERE e.session_id = $1
+			AND e.location IS NOT NULL
+			AND lower(e.name) <> 'origin'
+		ORDER BY e.created_at ASC
 	`, sessionID)
 	if err != nil {
 		return nil, err
@@ -200,12 +248,76 @@ func fetchGeocodedErrands(ctx context.Context, pool *pgxpool.Pool, sessionID str
 	errands := make([]errandRow, 0)
 	for rows.Next() {
 		var errand errandRow
-		if err := rows.Scan(&errand.ID, &errand.Name, &errand.Address, &errand.Lat, &errand.Lng); err != nil {
+		if err := rows.Scan(
+			&errand.ID,
+			&errand.Name,
+			&errand.Address,
+			&errand.Lat,
+			&errand.Lng,
+			&errand.PlaceID,
+			&errand.OpenNow,
+			&errand.OpensAt,
+			&errand.ClosesAt,
+		); err != nil {
 			return nil, err
 		}
 		errands = append(errands, errand)
 	}
 	return errands, rows.Err()
+}
+
+func fetchSessionOrigin(ctx context.Context, pool *pgxpool.Pool, sessionID string) (clustering.Point, bool) {
+	var lat, lng float64
+	err := pool.QueryRow(ctx, `
+		SELECT
+			ST_Y(origin::geometry),
+			ST_X(origin::geometry)
+		FROM sessions
+		WHERE id = $1::uuid AND origin IS NOT NULL
+	`, sessionID).Scan(&lat, &lng)
+	if err != nil {
+		return clustering.Point{}, false
+	}
+	return clustering.Point{Lat: lat, Lng: lng}, true
+}
+
+func toClusteringPoint(errand errandRow, now time.Time) clustering.Point {
+	point := clustering.Point{
+		Lat: errand.Lat,
+		Lng: errand.Lng,
+	}
+	if errand.PlaceID == nil {
+		return point
+	}
+
+	point.PlaceID = *errand.PlaceID
+	point.HasHours = errand.OpenNow != nil || errand.OpensAt != nil || errand.ClosesAt != nil
+	if errand.OpenNow != nil {
+		point.OpenNow = *errand.OpenNow
+	}
+	if errand.OpensAt != nil {
+		opensAt := storehours.TimeOfDayToToday(*errand.OpensAt, now)
+		point.OpensAt = opensAt
+	}
+	if errand.ClosesAt != nil {
+		closesAt := storehours.TimeOfDayToToday(*errand.ClosesAt, now)
+		if errand.OpensAt != nil {
+			opensAt := storehours.TimeOfDayToToday(*errand.OpensAt, now)
+			if closesAt.Before(opensAt) {
+				closesAt = closesAt.Add(24 * time.Hour)
+			}
+		}
+		point.ClosesAt = closesAt
+	}
+
+	return point
+}
+
+func formatOptionalTime(value *time.Time, now time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return storehours.TimeOfDayToToday(*value, now).Format(time.RFC3339)
 }
 
 func updateErrandCluster(ctx context.Context, pool *pgxpool.Pool, errandID string, clusterID int) error {

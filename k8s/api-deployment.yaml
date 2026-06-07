@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: haul-api
+  namespace: haul
+  labels:
+    app: haul-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: haul-api
+  template:
+    metadata:
+      labels:
+        app: haul-api
+    spec:
+      serviceAccountName: job-spawner
+      containers:
+        - name: api
+          image: haul-api:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: haul-config
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: haul-secrets
+                  key: DATABASE_URL
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: haul-secrets
+                  key: JWT_SECRET
+            - name: GOOGLE_PLACES_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: haul-secrets
+                  key: GOOGLE_PLACES_KEY
+            - name: GOOGLE_ROUTES_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: haul-secrets
+                  key: GOOGLE_ROUTES_KEY
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            limits:
+              memory: 256Mi
+              cpu: 250m

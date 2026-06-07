@@ -134,3 +134,18 @@
   background-image: radial-gradient(circle, oklch(0.82 0.01 90 / 0.22) 1px, transparent 1px);
   background-size: 22px 22px;
 }
+
+.haul-popup.maplibregl-popup {
+  z-index: 10;
+}
+
+.haul-popup .maplibregl-popup-content {
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+}
+
+.haul-popup .maplibregl-popup-tip {
+  display: none;
+}

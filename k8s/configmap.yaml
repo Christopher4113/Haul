@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: haul-config
+  namespace: haul
+data:
+  PORT: "8080"
+  ENV: "production"

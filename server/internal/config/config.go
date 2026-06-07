@@ -13,6 +13,7 @@ type Config struct {
 	JWTSecret        string
 	Env              string
 	GooglePlacesKey  string
+	GoogleRoutesKey  string
 	SMTP             SMTPConfig
 }
 
@@ -35,9 +36,9 @@ func Load() Config {
 		port = "8080"
 	}
 
-	dbURL := os.Getenv("NEON_DB_URL")
+	dbURL := firstEnv("DATABASE_URL", "NEON_DB_URL")
 	if dbURL == "" {
-		log.Fatal("NEON_DB_URL is not set")
+		log.Fatal("DATABASE_URL or NEON_DB_URL is not set")
 	}
 
 	jwtSecret := os.Getenv("JWT_SECRET")
@@ -79,6 +80,7 @@ func Load() Config {
 		JWTSecret:       jwtSecret,
 		Env:             env,
 		GooglePlacesKey: os.Getenv("GOOGLE_PLACES_KEY"),
+		GoogleRoutesKey: os.Getenv("GOOGLE_ROUTES_KEY"),
 		SMTP: SMTPConfig{
 			Host:      smtpHost,
 			Port:      smtpPort,

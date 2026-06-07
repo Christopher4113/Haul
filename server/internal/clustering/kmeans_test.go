@@ -1,6 +1,9 @@
 package clustering
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestKMeansAssignments(t *testing.T) {
 	points := []Point{
@@ -10,7 +13,7 @@ func TestKMeansAssignments(t *testing.T) {
 		{Lat: 10.1, Lng: 10.1},
 	}
 
-	assignments := KMeans(points, 2)
+	assignments := KMeans(points, 2, time.Now())
 	if len(assignments) != len(points) {
 		t.Fatalf("expected %d assignments, got %d", len(points), len(assignments))
 	}
@@ -26,8 +29,21 @@ func TestKMeansAssignments(t *testing.T) {
 }
 
 func TestKMeansSinglePoint(t *testing.T) {
-	assignments := KMeans([]Point{{Lat: 43.65, Lng: -79.38}}, 3)
+	assignments := KMeans([]Point{{Lat: 43.65, Lng: -79.38}}, 3, time.Now())
 	if len(assignments) != 1 || assignments[0] != 0 {
 		t.Fatalf("unexpected assignments: %v", assignments)
+	}
+}
+
+func TestWeightedDistanceDeprioritizesClosedStores(t *testing.T) {
+	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.Local)
+	open := Point{Lat: 43.65, Lng: -79.38, HasHours: true, OpenNow: true}
+	closed := Point{Lat: 43.651, Lng: -79.381, HasHours: true, OpenNow: false}
+	centroid := Point{Lat: 43.65, Lng: -79.38}
+
+	openDist := WeightedDistance(centroid, open, now)
+	closedDist := WeightedDistance(centroid, closed, now)
+	if closedDist <= openDist {
+		t.Fatalf("expected closed store distance to be penalized")
 	}
 }

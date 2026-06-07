@@ -10,7 +10,21 @@ import (
 type Claims struct {
 	UserID string `json:"user_id"`
 	Email  string `json:"email"`
+	ID     string `json:"id"`
 	jwt.RegisteredClaims
+}
+
+func ResolveUserID(claims *Claims) string {
+	if claims == nil {
+		return ""
+	}
+	if claims.UserID != "" {
+		return claims.UserID
+	}
+	if claims.Subject != "" {
+		return claims.Subject
+	}
+	return claims.ID
 }
 
 func GenerateToken(userID, email, secret string) (string, error) {

@@ -63,7 +63,94 @@ export interface Errand {
   address: string
   lat: number | null
   lng: number | null
-  clusterId: string | null
+  clusterId: number | null
+  seqOrder: number | null
+  openNow: boolean | null
+  opensAt: string | null
+  closesAt: string | null
+}
+
+export interface OptimizeRouteResponse {
+  route_id: string
+}
+
+export interface ClusterSummary {
+  id: number
+  centroid_lat: number
+  centroid_lng: number
+  count: number
+}
+
+export interface RouteLeg {
+  from_id: string
+  to_id: string
+  duration_mins: number
+  distance_km: number
+}
+
+export interface OptimizedOrderItem {
+  id: string
+  name: string
+  seq_order: number
+  lat: number
+  lng: number
+  cluster_id: number
+  open_now: boolean | null
+  opens_at: string | null
+  closes_at: string | null
+}
+
+export interface GeoJSONLineString {
+  type: "LineString"
+  coordinates: [number, number][]
+}
+
+export type OptimizerEvent =
+  | { type: "geocoded"; count: number }
+  | { type: "clustered"; clusters: ClusterSummary[] }
+  | {
+      type: "optimized"
+      geojson: GeoJSONLineString
+      total_km?: number
+      total_mins?: number
+      legs?: RouteLeg[]
+      order: OptimizedOrderItem[]
+    }
+  | { type: "done" }
+  | { type: "error"; message: string }
+
+export interface RouteGeoJSON {
+  type: "Feature"
+  properties: Record<string, never>
+  geometry: GeoJSONLineString
+}
+
+export interface SavedStop {
+  id: string
+  name: string
+  address: string
+  lat: number
+  lng: number
+  seq_order: number | null
+  cluster_id: number | null
+}
+
+export interface SavedSession {
+  id: string
+  name: string
+  saved_at: string
+  stop_count: number
+  total_km: number | null
+  total_mins: number | null
+  status: string
+  stops: SavedStop[]
+  geojson: GeoJSONLineString | null
+}
+
+export interface SaveSessionResponse {
+  id: string
+  name: string
+  saved_at: string
 }
 
 export const api = {
@@ -104,14 +191,31 @@ export const api = {
       token,
     ),
 
-  optimizeRoute: async (token: string, sessionId: string, signal?: AbortSignal) => {
-    const response = await fetch(`${API_URL}/api/routes/optimize`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+  optimizeRoute: (
+    token: string,
+    body: {
+      session_id: string
+      origin_lat?: number
+      origin_lng?: number
+    },
+  ) =>
+    request<OptimizeRouteResponse>(
+      "/api/routes/optimize",
+      {
+        method: "POST",
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify({ session_id: sessionId }),
+      token,
+    ),
+
+  streamRoute: async (
+    token: string,
+    routeId: string,
+    onEvent: (event: OptimizerEvent) => void,
+    signal?: AbortSignal,
+  ) => {
+    const response = await fetch(`${API_URL}/api/routes/${routeId}/stream`, {
+      headers: { Authorization: `Bearer ${token}` },
       signal,
     })
 
@@ -123,8 +227,82 @@ export const api = {
       )
     }
 
-    return response
+    const reader = response.body?.getReader()
+    if (!reader) {
+      throw new ApiError(500, "Stream not available")
+    }
+
+    const decoder = new TextDecoder()
+    let buffer = ""
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) {
+          break
+        }
+
+        buffer += decoder.decode(value, { stream: true })
+        const chunks = buffer.split("\n\n")
+        buffer = chunks.pop() ?? ""
+
+        for (const chunk of chunks) {
+          const dataLine = chunk
+            .split("\n")
+            .find((line) => line.startsWith("data: "))
+          if (!dataLine) {
+            continue
+          }
+
+          const event = JSON.parse(dataLine.slice(6)) as OptimizerEvent
+          onEvent(event)
+
+          if (
+            event.type === "optimized" ||
+            event.type === "done" ||
+            event.type === "error"
+          ) {
+            return
+          }
+        }
+      }
+    } finally {
+      await reader.cancel()
+    }
   },
+
+  saveSession: (token: string, sessionId: string, name: string) =>
+    request<SaveSessionResponse>(
+      `/api/sessions/${sessionId}`,
+      { method: "PATCH", body: JSON.stringify({ name }) },
+      token,
+    ),
+
+  getSessions: (token: string) =>
+    request<SavedSession[]>("/api/sessions", { method: "GET" }, token),
+
+  deleteSession: async (token: string, sessionId: string) => {
+    const response = await fetch(`${API_URL}/api/sessions/${sessionId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    })
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ error: "Delete failed" }))
+      throw new ApiError(
+        response.status,
+        typeof err.error === "string" ? err.error : "Delete failed",
+      )
+    }
+  },
+}
+
+export function toRouteGeoJSON(lineString: GeoJSONLineString): RouteGeoJSON {
+  return {
+    type: "Feature",
+    properties: {},
+    geometry: lineString,
+  }
 }
 
 export const TOKEN_KEY = "haul_token"

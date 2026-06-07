@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -16,15 +17,21 @@ import (
 )
 
 type RouteHandler struct {
-	pool *pgxpool.Pool
+	pool            *pgxpool.Pool
+	googleRoutesKey string
 }
 
-func NewRouteHandler(pool *pgxpool.Pool) *RouteHandler {
-	return &RouteHandler{pool: pool}
+func NewRouteHandler(pool *pgxpool.Pool, googleRoutesKey string) *RouteHandler {
+	return &RouteHandler{
+		pool:            pool,
+		googleRoutesKey: googleRoutesKey,
+	}
 }
 
 type optimizeRouteRequest struct {
-	SessionID string `json:"session_id"`
+	SessionID string   `json:"session_id"`
+	OriginLat *float64 `json:"origin_lat"`
+	OriginLng *float64 `json:"origin_lng"`
 }
 
 type optimizeRouteResponse struct {
@@ -60,6 +67,18 @@ func (h *RouteHandler) Optimize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.OriginLat != nil && req.OriginLng != nil {
+		originWKT := fmt.Sprintf("SRID=4326;POINT(%f %f)", *req.OriginLng, *req.OriginLat)
+		if _, err := h.pool.Exec(r.Context(), `
+			UPDATE sessions
+			SET origin = ST_GeogFromText($2::text)
+			WHERE id = $1::uuid
+		`, req.SessionID, originWKT); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save origin")
+			return
+		}
+	}
+
 	var routeID string
 	err = h.pool.QueryRow(r.Context(), `
 		INSERT INTO routes (session_id, status)
@@ -71,7 +90,10 @@ func (h *RouteHandler) Optimize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go optimizer.Run(context.Background(), h.pool, routeID, req.SessionID)
+	if err := optimizer.SpawnOptimizerJob(routeID); err != nil {
+		log.Printf("k8s optimizer spawn failed for route %s, falling back to goroutine: %v", routeID, err)
+		go optimizer.Run(context.Background(), h.pool, routeID, req.SessionID, h.googleRoutesKey)
+	}
 
 	writeJSON(w, http.StatusAccepted, optimizeRouteResponse{RouteID: routeID})
 }
@@ -109,7 +131,28 @@ func (h *RouteHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	sendSSE := func(payload string) bool {
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+
+	closeWithDone := func() {
+		sendSSE(`{"type":"done"}`)
+	}
+
+	closeWithError := func(message string) {
+		payload, _ := json.Marshal(map[string]string{
+			"type":    "error",
+			"message": message,
+		})
+		sendSSE(string(payload))
+	}
+
 	lastEventID := int64(0)
+	deadline := time.Now().Add(30 * time.Second)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -118,24 +161,45 @@ func (h *RouteHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
-			events, err := h.fetchEventsSince(r.Context(), routeID, lastEventID)
-			if err != nil {
+			if time.Now().After(deadline) {
+				closeWithError("optimization timed out")
 				return
 			}
 
+			events, err := h.fetchEventsSince(r.Context(), routeID, lastEventID)
+			if err != nil {
+				closeWithError("failed to read optimizer events")
+				return
+			}
+
+			sentOptimized := false
 			for _, event := range events {
-				if _, err := fmt.Fprintf(w, "data: %s\n\n", event.Payload); err != nil {
+				if !sendSSE(string(event.Payload)) {
 					return
 				}
-				flusher.Flush()
 				lastEventID = event.ID
+
+				if event.EventType == "optimized" {
+					sentOptimized = true
+				}
+				if event.EventType == "error" {
+					return
+				}
 			}
 
 			status, err := h.routeStatus(r.Context(), routeID)
 			if err != nil {
+				closeWithError("failed to read route status")
 				return
 			}
-			if status == "done" || status == "error" {
+
+			if status == "error" {
+				closeWithError("optimization failed")
+				return
+			}
+
+			if status == "done" || sentOptimized {
+				closeWithDone()
 				return
 			}
 		}
@@ -143,13 +207,14 @@ func (h *RouteHandler) Stream(w http.ResponseWriter, r *http.Request) {
 }
 
 type streamEvent struct {
-	ID      int64
-	Payload json.RawMessage
+	ID        int64
+	Payload   json.RawMessage
+	EventType string
 }
 
 func (h *RouteHandler) fetchEventsSince(ctx context.Context, routeID string, afterID int64) ([]streamEvent, error) {
 	rows, err := h.pool.Query(ctx, `
-		SELECT id, payload
+		SELECT id, payload, event_type
 		FROM optimizer_events
 		WHERE route_id = $1 AND id > $2
 		ORDER BY id ASC
@@ -162,7 +227,7 @@ func (h *RouteHandler) fetchEventsSince(ctx context.Context, routeID string, aft
 	events := make([]streamEvent, 0)
 	for rows.Next() {
 		var event streamEvent
-		if err := rows.Scan(&event.ID, &event.Payload); err != nil {
+		if err := rows.Scan(&event.ID, &event.Payload, &event.EventType); err != nil {
 			return nil, err
 		}
 		events = append(events, event)

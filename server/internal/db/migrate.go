@@ -69,6 +69,28 @@ CREATE TABLE IF NOT EXISTS optimizer_events (
 	payload     JSONB,
 	created_at  TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS store_hours (
+	place_id   TEXT PRIMARY KEY,
+	hours_json JSONB,
+	open_now   BOOLEAN,
+	opens_at   TIME,
+	closes_at  TIME,
+	fetched_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS name TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS saved_at TIMESTAMPTZ;
+
+ALTER TABLE routes DROP CONSTRAINT IF EXISTS routes_session_id_fkey;
+ALTER TABLE routes
+	ADD CONSTRAINT routes_session_id_fkey
+	FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE;
+
+ALTER TABLE optimizer_events DROP CONSTRAINT IF EXISTS optimizer_events_route_id_fkey;
+ALTER TABLE optimizer_events
+	ADD CONSTRAINT optimizer_events_route_id_fkey
+	FOREIGN KEY (route_id) REFERENCES routes(id) ON DELETE CASCADE;
 `
 
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {

@@ -141,3 +141,64 @@ func (c *Client) details(ctx context.Context, placeID string) (*Result, error) {
 		Lng:     lng,
 	}, nil
 }
+
+func (c *Client) FetchOpeningHours(ctx context.Context, placeID string) (*OpeningHours, error) {
+	if c.apiKey == "" {
+		return nil, fmt.Errorf("google places api key is not configured")
+	}
+
+	endpoint := "https://maps.googleapis.com/maps/api/place/details/json"
+	query := url.Values{}
+	query.Set("place_id", placeID)
+	query.Set("fields", "opening_hours")
+	query.Set("key", c.apiKey)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+query.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var payload struct {
+		Status string `json:"status"`
+		Result struct {
+			OpeningHours OpeningHours `json:"opening_hours"`
+		} `json:"result"`
+		ErrorMessage string `json:"error_message"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	if payload.Status != "OK" {
+		if payload.ErrorMessage != "" {
+			return nil, fmt.Errorf("places opening hours: %s", payload.ErrorMessage)
+		}
+		return nil, fmt.Errorf("places opening hours: %s", payload.Status)
+	}
+
+	if len(payload.Result.OpeningHours.Periods) == 0 && payload.Result.OpeningHours.OpenNow == nil {
+		return nil, fmt.Errorf("places opening hours: no hours available")
+	}
+
+	return &payload.Result.OpeningHours, nil
+}
+
+type PeriodTime struct {
+	Day  int    `json:"day"`
+	Time string `json:"time"`
+}
+
+type Period struct {
+	Open  PeriodTime `json:"open"`
+	Close PeriodTime `json:"close"`
+}
+
+type OpeningHours struct {
+	OpenNow *bool    `json:"open_now"`
+	Periods []Period `json:"periods"`
+}

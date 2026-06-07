@@ -1,0 +1,44 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: optimizer-{{ROUTE_ID}}
+  namespace: haul
+  labels:
+    app: optimizer
+    route-id: "{{ROUTE_ID}}"
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app: optimizer
+        route-id: "{{ROUTE_ID}}"
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: optimizer
+          image: haul-optimizer:latest
+          imagePullPolicy: Never
+          env:
+            - name: ROUTE_ID
+              value: "{{ROUTE_ID}}"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: haul-secrets
+                  key: DATABASE_URL
+            - name: GOOGLE_PLACES_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: haul-secrets
+                  key: GOOGLE_PLACES_KEY
+            - name: GOOGLE_ROUTES_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: haul-secrets
+                  key: GOOGLE_ROUTES_KEY
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: haul-secrets
+                  key: JWT_SECRET
