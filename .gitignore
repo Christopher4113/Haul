@@ -21,3 +21,4 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 .idea/
+k8s/secret.yaml
