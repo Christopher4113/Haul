@@ -22,3 +22,6 @@ Thumbs.db
 !.vscode/extensions.json
 .idea/
 k8s/secret.yaml
+*.tar
+haul-api.tar
+haul-optimizer.tar
